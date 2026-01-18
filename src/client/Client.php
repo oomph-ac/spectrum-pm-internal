@@ -180,6 +180,10 @@ final class Client {
 
     public function write(string $buffer, bool $decodeNeeded): void
     {
+        if ($this->closed) {
+            return;
+        }
+
         $flags = 0;
         if ($decodeNeeded) {
             $flags |= Client::FLAG_PACKET_DECODE_NEEDED;

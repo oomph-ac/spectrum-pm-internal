@@ -81,21 +81,14 @@ final class Client {
         return $this->closed;
     }
 
-    public function tick(): void
-    {
+    public function tick(): void {
         if ($this->closed) {
             return;
         }
-
-
-        // Flush any deferred outbound data first
         if (strlen($this->deferredWrite) > 0) {
             $this->flushDeferred();
         }
-        // Read data from socket
-
-        $data = @socket_read($this->socket, 65535);
-
+        $data = @socket_read($this->socket, 131072);
         if ($data === false) {
             $error = socket_last_error($this->socket);
             if ($error === SOCKET_EWOULDBLOCK) {

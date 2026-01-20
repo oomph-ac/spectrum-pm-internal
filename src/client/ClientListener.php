@@ -58,8 +58,8 @@ use const SO_SNDBUF;
 
 final class ClientListener
 {
-    private const READ_BUFFER_SIZE = 8 * 1024 * 1024; // 8MB
-    private const WRITE_BUFFER_SIZE = 8 * 1024 * 1024; // 8MB
+    private const READ_BUFFER_SIZE = 7 * 1024 * 1024; // 7MB
+    private const WRITE_BUFFER_SIZE = 7 * 1024 * 1024; // 7MB
 
     private Socket $socket;
     private int $nextId = 0;
@@ -91,7 +91,7 @@ final class ClientListener
         socket_set_nonblock($this->socket);
         socket_bind($this->socket, "0.0.0.0", $this->port);
         socket_listen($this->socket);
-        socket_set_nonblock($this->notificationSocket); 
+        socket_set_nonblock($this->notificationSocket);
         $this->logger->info("Started listening on TCP port " . $this->port);
     }
 
@@ -100,16 +100,16 @@ final class ClientListener
         // Accept new connections
         while (($clientSocket = @socket_accept($this->socket)) !== false) {
             socket_set_nonblock($clientSocket);
-            
+
             // Set TCP options
             socket_set_option($clientSocket, SOL_TCP, TCP_NODELAY, 1);
-            
+
             $linger = ["l_onoff" => 1, "l_linger" => 0];
             socket_set_option($clientSocket, SOL_SOCKET, SO_LINGER, $linger);
-            
+            socket_set_option($clientSocket, SOL_SOCKET, SO_KEEPALIVE, 1);
             socket_set_option($clientSocket, SOL_SOCKET, SO_RCVBUF, self::READ_BUFFER_SIZE);
             socket_set_option($clientSocket, SOL_SOCKET, SO_SNDBUF, self::WRITE_BUFFER_SIZE);
-            
+
             $identifier = $this->nextId++;
             $client = new Client(
                 socket: $clientSocket,

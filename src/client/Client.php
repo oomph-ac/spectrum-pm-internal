@@ -63,6 +63,7 @@ final class Client {
     private const FLAG_PACKET_BATCHED = 1 << 2;
 
     private string $buffer = "";
+    private string $deferredWrite = "";
 
     private ?int $expected = ProxyPacketIds::CONNECTION_REQUEST;
     private int $length = 0;
@@ -86,8 +87,15 @@ final class Client {
             return;
         }
 
+
+        // Flush any deferred outbound data first
+        if (strlen($this->deferredWrite) > 0) {
+            $this->flushDeferred();
+        }
         // Read data from socket
+
         $data = @socket_read($this->socket, 65535);
+
         if ($data === false) {
             $error = socket_last_error($this->socket);
             if ($error === SOCKET_EWOULDBLOCK) {
@@ -99,7 +107,7 @@ final class Client {
             $this->close();
             return;
         }
-        
+
         if ($data === "") {
             // Connection closed by peer
             $this->logger->debug("Connection closed by peer");
@@ -135,8 +143,8 @@ final class Client {
         $flags = Binary::readByte($this->buffer[0]);
         $needsCompression = ($flags & Client::FLAG_PACKET_COMPRESSED) !== 0;
         $isBatch = ($flags & Client::FLAG_PACKET_BATCHED) !== 0;
-        $payload = $needsCompression ? 
-            @snappy_uncompress(substr($this->buffer, 1, $this->length - 1)) : 
+        $payload = $needsCompression ?
+            @snappy_uncompress(substr($this->buffer, 1, $this->length - 1)) :
             substr($this->buffer, 1, $this->length - 1);
         if ($payload !== false) {
 			$isBatch ? $this->handleBatch($payload) : $this->handlePacket($payload);
@@ -178,10 +186,12 @@ final class Client {
         }
     }
 
-    public function write(string $buffer, bool $decodeNeeded): void
-    {
+    public function write(string $buffer, bool $decodeNeeded): void {
         if ($this->closed) {
             return;
+        }
+        if (strlen($this->deferredWrite) > 0) {
+            $this->flushDeferred();
         }
 
         $flags = 0;
@@ -191,13 +201,19 @@ final class Client {
         if (($compressionNeeded = strlen($buffer) > Client::COMPRESSION_THRESHOLD)) {
             $flags |= Client::FLAG_PACKET_COMPRESSED;
             $payload = @snappy_compress($buffer);
+        } else {
+            $payload = $buffer;
         }
-        
-        $payload = $compressionNeeded ? @snappy_compress($buffer) : $buffer;
         $payload = Binary::writeInt(strlen($payload) + 1) .
             Binary::writeByte($flags) .
             $payload;
-        
+
+        if (strlen($this->deferredWrite) > 0) {
+            // system is still backpressured, queue this payload
+            $this->deferredWrite .= $payload;
+            return;
+        }
+
         $dataLength = strlen($payload);
         $totalSent = 0;
         $writeAttempts = 0;
@@ -205,31 +221,76 @@ final class Client {
         while ($totalSent < $dataLength) {
             $sent = @socket_write($this->socket, substr($payload, $totalSent));
             if ($sent === false) {
-                $this->logger->debug("failed to write data to socket: " . socket_strerror(socket_last_error($this->socket)));
+                $lastError = socket_last_error($this->socket);
+                if ($lastError === SOCKET_EWOULDBLOCK) {
+                    $this->deferredWrite .= substr($payload, $totalSent);
+                    return;
+                }
+                $this->logger->debug("failed to write data to socket: " . socket_strerror($lastError));
+                $this->close();
+                return;
+            }
+
+            if ($sent === 0) {
+                $writeAttempts++;
+                if ($writeAttempts > 10) {
+                    // kernel send buffer full; defer remaining data
+                    $this->deferredWrite .= substr($payload, $totalSent);
+                    return;
+                }
+            } else {
+                $writeAttempts = 0;
+            }
+            if ($sent > 0) {
+                $totalSent += $sent;
+            }
+        }
+    }
+
+    private function flushDeferred(): void {
+        if ($this->closed || $this->deferredWrite === "") {
+            return;
+        }
+        while ($this->deferredWrite !== "") {
+            $sent = @socket_write($this->socket, $this->deferredWrite);
+            if ($sent === false) {
+                $err = socket_last_error($this->socket);
+                if ($err === SOCKET_EWOULDBLOCK) {
+                    // still not writable; try again later
+                    return;
+                }
+                $this->logger->debug("failed to flush deferred data to socket: " . socket_strerror($err));
                 $this->close();
                 return;
             }
             if ($sent === 0) {
-                $writeAttempts++;
-                if ($writeAttempts > 10) {
-                    $this->logger->debug("socket_write wrote 0 bytes for 10 times, closing connection");
-                    $this->close();
-                    return;
-                }
+                // can't write right now; try again later
+                return;
             }
-            $totalSent += $sent;
+            if ($sent >= strlen($this->deferredWrite)) {
+                $this->deferredWrite = "";
+                break;
+            }
+            $this->deferredWrite = substr($this->deferredWrite, $sent);
         }
     }
 
     public function close(): void
+
     {
         if ($this->closed) {
             return;
         }
-        $this->closed = true;
-        $this->buffer = "";
-        socket_close($this->socket);
-        $this->logger->debug("Closed client " . $this->id);
+
+                $this->closed = true;
+
+                $this->buffer = "";
+
+                $this->deferredWrite = "";
+                socket_close($this->socket);
+
+                $this->logger->debug("Closed client " . $this->id);
+
     }
 
     public function __destruct()

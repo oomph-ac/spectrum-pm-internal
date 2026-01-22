@@ -58,8 +58,8 @@ use const SO_SNDBUF;
 
 final class ClientListener
 {
-    private const READ_BUFFER_SIZE = 7 * 1024 * 1024; // 7MB
-    private const WRITE_BUFFER_SIZE = 7 * 1024 * 1024; // 7MB
+    private const READ_BUFFER_SIZE = 512 * 1024; // 512KB (0.5MB)
+    private const WRITE_BUFFER_SIZE = 512 * 1024; // 512KB (0.5MB)
 
     private Socket $socket;
     private int $nextId = 0;
@@ -73,16 +73,19 @@ final class ClientListener
 
     public function __construct(
         private readonly SleeperHandlerEntry $sleeperHandlerEntry,
-        private readonly Socket              $notificationSocket,
-        private readonly ThreadSafeLogger    $logger,
+        private readonly Socket $notificationSocket,
+        private readonly ThreadSafeLogger $logger,
 
-        private readonly int                 $port,
+        private readonly int $port,
 
-        ThreadSafeArray                      $mainToThread,
-        ThreadSafeArray                      $threadToMain,
+        ThreadSafeArray $mainToThread,
+        ThreadSafeArray $threadToMain,
     ) {
         $this->mainToThread = new PthreadsChannelReader($mainToThread);
-        $this->threadToMain = new SnoozeAwarePthreadsChannelWriter($threadToMain, $this->sleeperHandlerEntry->createNotifier());
+        $this->threadToMain = new SnoozeAwarePthreadsChannelWriter(
+            $threadToMain,
+            $this->sleeperHandlerEntry->createNotifier(),
+        );
     }
 
     public function start(): void
@@ -107,8 +110,18 @@ final class ClientListener
             $linger = ["l_onoff" => 1, "l_linger" => 0];
             socket_set_option($clientSocket, SOL_SOCKET, SO_LINGER, $linger);
             socket_set_option($clientSocket, SOL_SOCKET, SO_KEEPALIVE, 1);
-            socket_set_option($clientSocket, SOL_SOCKET, SO_RCVBUF, self::READ_BUFFER_SIZE);
-            socket_set_option($clientSocket, SOL_SOCKET, SO_SNDBUF, self::WRITE_BUFFER_SIZE);
+            socket_set_option(
+                $clientSocket,
+                SOL_SOCKET,
+                SO_RCVBUF,
+                self::READ_BUFFER_SIZE,
+            );
+            socket_set_option(
+                $clientSocket,
+                SOL_SOCKET,
+                SO_SNDBUF,
+                self::WRITE_BUFFER_SIZE,
+            );
 
             $identifier = $this->nextId++;
             $client = new Client(
@@ -121,8 +134,20 @@ final class ClientListener
 
             // Get client address
             socket_getpeername($clientSocket, $address, $port);
-            $this->threadToMain->write(ProxySerializer::encode($identifier, LoginPacket::create($address, $port)));
-            $this->logger->debug("Accepted client " . $identifier . " from " . $address . ":" . $port);
+            $this->threadToMain->write(
+                ProxySerializer::encode(
+                    $identifier,
+                    LoginPacket::create($address, $port),
+                ),
+            );
+            $this->logger->debug(
+                "Accepted client " .
+                    $identifier .
+                    " from " .
+                    $address .
+                    ":" .
+                    $port,
+            );
         }
 
         // Handle existing clients
@@ -148,7 +173,11 @@ final class ClientListener
     private function write(): void
     {
         while (($out = $this->mainToThread->read()) !== null) {
-            [$identifier, $decodeNeeded, $buffer] = ProxySerializer::decodeRawWithDecodeNecessity($out);
+            [
+                $identifier,
+                $decodeNeeded,
+                $buffer,
+            ] = ProxySerializer::decodeRawWithDecodeNecessity($out);
             $client = $this->clients[$identifier] ?? null;
             if ($client === null) {
                 continue;
@@ -177,7 +206,12 @@ final class ClientListener
         }
 
         if ($notifyMain) {
-            $this->threadToMain->write(ProxySerializer::encode($client->id, DisconnectPacket::create()));
+            $this->threadToMain->write(
+                ProxySerializer::encode(
+                    $client->id,
+                    DisconnectPacket::create(),
+                ),
+            );
         }
         $client->close();
         unset($this->clients[$client->id]);
